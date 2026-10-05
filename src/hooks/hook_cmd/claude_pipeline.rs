@@ -150,8 +150,8 @@ fn shell_gate(v: &Value) -> bool {
             true
         }
         ShellHookDecision::Swap { command, rule } => {
-            let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
-            match decision::decide_for_agent(cmd, verdict) {
+            let rules = permissions::HostRules::load(permissions::Host::Claude, None);
+            match decision::decide_for_host(cmd, &rules, None).1 {
                 HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => {
                     let output = pre_tool_use_rewrite_output(v, &command, None);
                     let _ = writeln!(io::stdout(), "{output}");
