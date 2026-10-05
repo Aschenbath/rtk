@@ -375,10 +375,7 @@ fn check_shell_wrapper_permissions(
 /// Missing and empty files are skipped. A file that exists but cannot be read
 /// or parsed may hold deny rules that can no longer be applied, so it fails
 /// closed: a warning is printed and every command gets at least `Ask`.
-///
-/// `rtk discover` checks thousands of transcript commands against these, so it
-/// loads them once up front and calls `check_command_with_rules` per command.
-pub(crate) fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     load_permission_rules_from(&get_settings_paths())
 }
 
