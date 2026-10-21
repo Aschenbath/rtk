@@ -1319,7 +1319,7 @@ mod tests {
         assert!(!note.contains("\u{1b}"));
         assert!(
             hook.get("updatedToolOutput").is_none(),
-            "a note never replaces the output: {out}"
+            "a note never replaces the output"
         );
     }
 
@@ -1343,7 +1343,7 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(
             v["hookSpecificOutput"].get("updatedToolOutput").is_none(),
-            "{out}"
+            "a note rule rewrote the output"
         );
     }
 
