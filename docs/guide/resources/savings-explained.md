@@ -45,26 +45,12 @@ This is why RTK reports bash output reduction rather than a cost figure. Bash ou
 
 ## Why the token counts are estimates
 
-`rtk gain` estimates tokens as `bytes / 4`:
-
-```rust
-// src/core/tracking.rs
-pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
-}
-```
-
-RTK ships **no real tokenizer** by design. Embedding one would cost startup time, and it would require a tokenizer per model, or a per-session model lookup, which RTK does not implement.
-
-The consequence is worth understanding:
+`rtk gain` estimates tokens as `bytes / 4` (rounded up). RTK ships **no tokenizer**, so:
 
 - **The percentage is reliable.** The same estimator is applied to the raw output and the filtered output, so the ratio between them holds regardless of the estimator's absolute accuracy.
-- **The absolute token counts are approximate.** They will not match your provider's billing. Treat `Input tokens: 45,230` as an order of magnitude, not an invoice line.
+- **The absolute token counts are approximate.** They will not match your provider's billing. Treat a figure such as `Input tokens: 50,000` as an order of magnitude, not an invoice line.
 
 If you need exact counts, run the raw and filtered output through your model's own tokenizer.
-
-Estimates are also capped at `tracking.estimate_cap_chars` (default 30,000 — a conservative upper bound, 0 = uncapped; override with `RTK_TRACK_CAP_CHARS`). Coding-agent shells commonly truncate captured command output at or below that point, so counting tokens past it would count "savings" no model ever actually saw — without the cap, a single oversized `rtk read` on a huge file could otherwise dominate the entire lifetime total by orders of magnitude.
 
 ## How to read `rtk gain`
 
@@ -85,5 +71,5 @@ Estimates are also capped at `tracking.estimate_cap_chars` (default 30,000 — a
 
 ## See also
 
-- [What RTK Optimizes](what-rtk-covers.md) — per-command bash output reduction
+- [What RTK Optimizes](what-rtk-covers.md) — what each supported command filter changes
 - [Token Savings Analytics](../analytics/gain.md) — reading the `rtk gain` dashboard

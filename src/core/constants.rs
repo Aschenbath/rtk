@@ -1,16 +1,11 @@
 pub const RTK_DATA_DIR: &str = "rtk";
 pub const HISTORY_DB: &str = "history.db";
+pub const RECALL_DB: &str = "recall.db";
 pub const CONFIG_TOML: &str = "config.toml";
 pub const FILTERS_TOML: &str = "filters.toml";
+pub const PIPELINE_TOML: &str = "pipeline.toml";
 pub const TRUSTED_FILTERS_JSON: &str = "trusted_filters.json";
 pub const DEFAULT_HISTORY_DAYS: i64 = 90;
-/// Default char ceiling for tracked token estimates. Coding-agent shells
-/// (Claude Code, etc.) truncate captured tool-result output well below this,
-/// so estimating tokens past it counts "savings" no model ever actually saw
-/// -- e.g. `rtk read` on a multi-hundred-MB file, uncapped, can record tens
-/// of millions of phantom saved tokens for output the agent would have
-/// truncated at a few tens of KB regardless. 0 disables the cap.
-pub const DEFAULT_ESTIMATE_CAP_CHARS: usize = 30_000;
 
 /// RTK-only subcommands that should never fall back to raw execution.
 /// When adding a new RTK-only subcommand to `Commands`, add its clap name here.
@@ -20,7 +15,9 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "learn",
     "init",
     "config",
+    "bypass",
     "proxy",
+    "recall",
     "run",
     "hook",
     "hook-audit",
@@ -35,4 +32,16 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
+    "llm-proxy",
+    "pipeline",
+    "methods",
+    "tasks",
+    "plugins",
+    "test",
+    "format",
+    // `err` and `summary` name no real binary, and since they grew `--shell`
+    // they have a flag to get wrong. Falling through would try to exec a
+    // program called `err` instead of reporting the flag error (#4125 review).
+    "err",
+    "summary",
 ];
