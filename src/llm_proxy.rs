@@ -637,6 +637,13 @@ pub enum Redirect {
         setup: &'static str,
         read: fn() -> Option<String>,
     },
+    CliOverride {
+        file: &'static str,
+        key: &'static str,
+        setup: &'static str,
+        read: fn() -> Option<String>,
+        path: fn() -> Option<&'static str>,
+    },
 }
 
 pub const PROXY_AGENTS: &[ProxyAgent] = &[
@@ -645,6 +652,17 @@ pub const PROXY_AGENTS: &[ProxyAgent] = &[
         label: "Claude Code",
         redirect: Redirect::Env {
             var: "ANTHROPIC_BASE_URL",
+        },
+    },
+    ProxyAgent {
+        name: "codex",
+        label: "Codex",
+        redirect: Redirect::CliOverride {
+            file: "~/.codex/config.toml",
+            key: "openai_base_url",
+            setup: "rtk init -g --codex",
+            read: crate::hooks::init::codex_openai_base_url,
+            path: crate::hooks::init::codex_proxy_path,
         },
     },
     ProxyAgent {
@@ -659,10 +677,11 @@ pub const PROXY_AGENTS: &[ProxyAgent] = &[
     },
 ];
 
-fn proxy_url(redirect: Redirect, bind: &str) -> String {
+fn proxy_url(redirect: Redirect, bind: &str) -> Option<String> {
     match redirect {
-        Redirect::Env { .. } => format!("http://{bind}"),
-        Redirect::ConfigFile { path, .. } => format!("http://{bind}{path}"),
+        Redirect::Env { .. } => Some(format!("http://{bind}")),
+        Redirect::ConfigFile { path, .. } => Some(format!("http://{bind}{path}")),
+        Redirect::CliOverride { path, .. } => path().map(|path| format!("http://{bind}{path}")),
     }
 }
 
@@ -695,12 +714,25 @@ enum LaunchPlan {
 }
 
 fn launch_plan(existing: Option<&str>, proxy_url: &str, daemon_up: bool) -> LaunchPlan {
+    launch_plan_with(existing, |url| url == proxy_url, daemon_up)
+}
+
+fn launch_plan_with(
+    existing: Option<&str>,
+    ours: impl Fn(&str) -> bool,
+    daemon_up: bool,
+) -> LaunchPlan {
     match existing {
-        Some(url) if !url.is_empty() && url != proxy_url => LaunchPlan::KeepExisting,
-        Some(url) if url == proxy_url && !daemon_up => LaunchPlan::UnproxiedClear,
+        Some(url) if !url.is_empty() && !ours(url) => LaunchPlan::KeepExisting,
+        Some(url) if !url.is_empty() && ours(url) && !daemon_up => LaunchPlan::UnproxiedClear,
         _ if daemon_up => LaunchPlan::Proxied,
         _ => LaunchPlan::Unproxied,
     }
+}
+
+fn under_daemon(url: &str, bind: &str) -> bool {
+    let prefix = format!("http://{bind}");
+    url == prefix || url.starts_with(&format!("{prefix}/"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -732,72 +764,110 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
         return Ok(127);
     }
     let bind = daemon_bind();
-    let base_url = proxy_url(agent.redirect, &bind);
-    let daemon_up = match ensure_running(&bind) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("rtk: proxy unavailable ({e:#})");
-            false
-        }
-    };
     let mut cmd = Command::new(agent.name);
-    cmd.args(args);
-    match agent.redirect {
-        Redirect::Env { var } => {
-            let existing = std::env::var(var).ok();
-            match launch_plan(existing.as_deref(), &base_url, daemon_up) {
-                LaunchPlan::Proxied => {
-                    cmd.env(var, &base_url);
+    let mut leading: Vec<String> = Vec::new();
+    if let Some(base_url) = proxy_url(agent.redirect, &bind) {
+        let daemon_up = match ensure_running(&bind) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("rtk: proxy unavailable ({e:#})");
+                false
+            }
+        };
+        let unproxied = || {
+            eprintln!(
+                "rtk: launching `{}` unproxied — API traffic will not be compressed. \
+                 Install the daemon (rtk llm-proxy setup) to enable it.",
+                agent.name
+            );
+        };
+        match agent.redirect {
+            Redirect::Env { var } => {
+                let existing = std::env::var(var).ok();
+                match launch_plan(existing.as_deref(), &base_url, daemon_up) {
+                    LaunchPlan::Proxied => {
+                        cmd.env(var, &base_url);
+                    }
+                    LaunchPlan::KeepExisting => {
+                        eprintln!(
+                            "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
+                        );
+                    }
+                    LaunchPlan::Unproxied => unproxied(),
+                    LaunchPlan::UnproxiedClear => {
+                        eprintln!(
+                            "rtk: {var} pointed at the rtk proxy, which is not running — launching `{}` \
+                             unproxied instead.",
+                            agent.name
+                        );
+                        cmd.env_remove(var);
+                    }
                 }
-                LaunchPlan::KeepExisting => {
-                    eprintln!(
-                        "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
-                    );
+            }
+            Redirect::CliOverride {
+                file, key, read, ..
+            } => {
+                let existing = read();
+                match launch_plan_with(
+                    existing.as_deref(),
+                    |url| under_daemon(url, &bind),
+                    daemon_up,
+                ) {
+                    LaunchPlan::Proxied => {
+                        leading.push("-c".to_string());
+                        leading.push(format!("{key}=\"{base_url}\""));
+                    }
+                    LaunchPlan::KeepExisting => {
+                        eprintln!(
+                            "rtk: {file} already sets {key} — leaving it; remove it to route through the rtk proxy"
+                        );
+                    }
+                    LaunchPlan::Unproxied => unproxied(),
+                    LaunchPlan::UnproxiedClear => {
+                        eprintln!(
+                            "rtk: {file} points {} at the rtk proxy, which is not running — launching `{}` \
+                             unproxied instead.",
+                            agent.label, agent.name
+                        );
+                        leading.push("-c".to_string());
+                        leading.push(format!("{key}=\"\""));
+                    }
                 }
-                LaunchPlan::Unproxied => {
+            }
+            Redirect::ConfigFile {
+                file, setup, read, ..
+            } => match config_launch(read().as_deref(), &base_url, daemon_up) {
+                ConfigLaunch::Proxied => {}
+                ConfigLaunch::NotConfigured => {
                     eprintln!(
                         "rtk: launching `{}` unproxied — API traffic will not be compressed. \
-                         Install the daemon (rtk llm-proxy setup) to enable it.",
+                         Run `{setup}` to route it through the rtk proxy.",
                         agent.name
                     );
                 }
-                LaunchPlan::UnproxiedClear => {
+                ConfigLaunch::Foreign => {
                     eprintln!(
-                        "rtk: {var} pointed at the rtk proxy, which is not running — launching `{}` \
-                         unproxied instead.",
-                        agent.name
+                        "rtk: {file} already routes {} elsewhere — leaving it; run `{setup}` to route it through the rtk proxy",
+                        agent.label
                     );
-                    cmd.env_remove(var);
                 }
-            }
+                ConfigLaunch::DeadProxy => {
+                    eprintln!(
+                        "rtk: {file} points {} at the rtk proxy, which is not running and could not be started — \
+                         run `rtk llm-proxy start`, or `{setup} --uninstall` to stop routing it",
+                        agent.label
+                    );
+                    return Ok(1);
+                }
+            },
         }
-        Redirect::ConfigFile {
-            file, setup, read, ..
-        } => match config_launch(read().as_deref(), &base_url, daemon_up) {
-            ConfigLaunch::Proxied => {}
-            ConfigLaunch::NotConfigured => {
-                eprintln!(
-                    "rtk: launching `{}` unproxied — API traffic will not be compressed. \
-                     Run `{setup}` to route it through the rtk proxy.",
-                    agent.name
-                );
-            }
-            ConfigLaunch::Foreign => {
-                eprintln!(
-                    "rtk: {file} already routes {} elsewhere — leaving it; run `{setup}` to route it through the rtk proxy",
-                    agent.label
-                );
-            }
-            ConfigLaunch::DeadProxy => {
-                eprintln!(
-                    "rtk: {file} points {} at the rtk proxy, which is not running and could not be started — \
-                     run `rtk llm-proxy start`, or `{setup} --uninstall` to stop routing it",
-                    agent.label
-                );
-                return Ok(1);
-            }
-        },
+    } else {
+        eprintln!(
+            "rtk: {} is not logged in, so no proxy route can be chosen — launching `{}` unproxied; log in, then run `rtk {}` again",
+            agent.label, agent.name, agent.name
+        );
     }
+    cmd.args(leading).args(args);
 
     #[cfg(unix)]
     {
@@ -832,6 +902,10 @@ fn run_setup() -> Result<()> {
             Redirect::ConfigFile { setup, .. } => println!(
                 "detected: {} ({}) -- run `{setup}` to route it through the proxy",
                 agent.name, agent.label
+            ),
+            Redirect::CliOverride { setup, .. } => println!(
+                "detected: {} ({}) -- `rtk {}` routes one session through the proxy; run `{setup}` to route every session",
+                agent.name, agent.label, agent.name
             ),
         }
     }
@@ -872,6 +946,10 @@ fn run_start(bind: Option<&str>, env_only: bool) -> Result<()> {
                 Redirect::ConfigFile { setup, .. } => {
                     println!("  {setup}");
                     println!("  then: rtk {} [{} args...]", agent.name, agent.name);
+                }
+                Redirect::CliOverride { setup, .. } => {
+                    println!("  rtk {} [{} args...]", agent.name, agent.name);
+                    println!("  or every session: {setup}");
                 }
             }
         }
@@ -944,7 +1022,7 @@ fn env_lines(bind: &str) -> Vec<String> {
         .iter()
         .filter_map(|agent| match agent.redirect {
             Redirect::Env { var } => Some(format!("export {var}=http://{bind}")),
-            Redirect::ConfigFile { .. } => None,
+            Redirect::ConfigFile { .. } | Redirect::CliOverride { .. } => None,
         })
         .collect()
 }
@@ -1037,14 +1115,15 @@ mod tests {
     #[test]
     fn only_verified_agents_get_a_subcommand() {
         assert!(resolve_agent("claude").is_some());
+        assert!(resolve_agent("codex").is_some());
         assert!(resolve_agent("vibe").is_some());
         // No base-URL override exists for these, so `rtk cursor` must stay
         // plain passthrough rather than pretending to route.
         for absent in [
             "cursor",
+            "cursor-agent",
             "windsurf",
             "cline",
-            "codex",
             "opencode",
             "antigravity",
             "agy",
@@ -1073,8 +1152,48 @@ mod tests {
                     );
                     assert!(setup.starts_with("rtk init"), "{}", agent.name);
                 }
+                Redirect::CliOverride {
+                    file, key, setup, ..
+                } => {
+                    assert!(file.ends_with(".toml"), "{}", agent.name);
+                    assert!(key.ends_with("base_url"), "{}", agent.name);
+                    assert!(setup.starts_with("rtk init"), "{}", agent.name);
+                }
             }
         }
+    }
+
+    #[test]
+    fn a_cli_override_agent_treats_any_daemon_namespace_as_its_own() {
+        let bind = "127.0.0.1:8080";
+        let ours = |url: &str| under_daemon(url, bind);
+        assert_eq!(launch_plan_with(None, ours, true), LaunchPlan::Proxied);
+        assert_eq!(
+            launch_plan_with(Some("http://127.0.0.1:8080/openai/v1"), ours, true),
+            LaunchPlan::Proxied,
+            "a stale namespace in the config is overridden, not kept"
+        );
+        assert_eq!(
+            launch_plan_with(
+                Some("http://127.0.0.1:8080/chatgpt/backend-api/codex"),
+                ours,
+                false
+            ),
+            LaunchPlan::UnproxiedClear
+        );
+        assert_eq!(
+            launch_plan_with(Some("https://gateway.corp/v1"), ours, true),
+            LaunchPlan::KeepExisting
+        );
+        assert_eq!(
+            launch_plan_with(Some("http://127.0.0.1:80801/v1"), ours, true),
+            LaunchPlan::KeepExisting,
+            "a longer port is a different host"
+        );
+        assert_eq!(
+            launch_plan_with(Some(""), ours, false),
+            LaunchPlan::Unproxied
+        );
     }
 
     #[test]
@@ -1099,12 +1218,12 @@ mod tests {
             ConfigLaunch::Foreign
         );
         assert_eq!(
-            proxy_url(resolve_agent("vibe").unwrap().redirect, "127.0.0.1:8080"),
-            ours
+            proxy_url(resolve_agent("vibe").unwrap().redirect, "127.0.0.1:8080").as_deref(),
+            Some(ours)
         );
         assert_eq!(
-            proxy_url(resolve_agent("claude").unwrap().redirect, "127.0.0.1:8080"),
-            "http://127.0.0.1:8080"
+            proxy_url(resolve_agent("claude").unwrap().redirect, "127.0.0.1:8080").as_deref(),
+            Some("http://127.0.0.1:8080")
         );
     }
 
@@ -1134,6 +1253,20 @@ mod tests {
                     "{}: {file} vs {documented}",
                     agent.name
                 ),
+                (
+                    Redirect::CliOverride { file, key, .. },
+                    Some(ConfigChannel::ConfigKey {
+                        file: documented,
+                        key: documented_key,
+                    }),
+                ) => {
+                    assert!(
+                        file.ends_with(documented),
+                        "{}: {file} vs {documented}",
+                        agent.name
+                    );
+                    assert_eq!(key, documented_key, "{}", agent.name);
+                }
                 (redirect, channel) => {
                     panic!(
                         "{}: launcher {redirect:?} disagrees with profile {channel:?}",

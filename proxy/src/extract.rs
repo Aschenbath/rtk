@@ -175,6 +175,26 @@ pub fn tool_calls_from_response(
                 }
             }
         }
+        Provider::OpenaiResponses => {
+            if let Some(items) = json.get("output").and_then(|o| o.as_array()) {
+                for item in items {
+                    if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+                        continue;
+                    }
+                    if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                        let input = item
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        out.push(ToolCall {
+                            name: name.to_string(),
+                            input,
+                        });
+                    }
+                }
+            }
+        }
         Provider::Openai => {
             if let Some(calls) = json
                 .pointer("/choices/0/message/tool_calls")
@@ -345,6 +365,19 @@ pub fn usage_from_obj(provider: &Provider, usage: &serde_json::Value) -> Usage {
                 // output rate and is EXCLUDED from candidatesTokenCount, so add it
                 // — otherwise thinking-enabled responses undercount output/cost.
                 output: get("candidatesTokenCount") + get("thoughtsTokenCount"),
+                cache_creation: 0,
+                cache_read,
+            }
+        }
+        Provider::OpenaiResponses => {
+            let cache_read = usage
+                .get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            Usage {
+                input: (get("input_tokens") - cache_read).max(0),
+                output: get("output_tokens"),
                 cache_creation: 0,
                 cache_read,
             }
@@ -576,6 +609,31 @@ mod tests {
             usage_from_response(&Provider::Anthropic, &json!({})),
             Usage::default()
         );
+        let responses = json!({ "usage": {
+            "input_tokens": 200, "output_tokens": 12,
+            "input_tokens_details": { "cached_tokens": 150 },
+            "output_tokens_details": { "reasoning_tokens": 4 }
+        }});
+        assert_eq!(
+            usage_from_response(&Provider::OpenaiResponses, &responses),
+            Usage {
+                input: 50,
+                output: 12,
+                cache_creation: 0,
+                cache_read: 150
+            }
+        );
+        let calls = tool_calls_from_response(
+            &Provider::OpenaiResponses,
+            &json!({ "output": [
+                { "type": "reasoning", "summary": [] },
+                { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"command\":[\"ls\"]}" },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "done" }] }
+            ]}),
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].input["command"][0], "ls");
         assert_eq!(
             usage_from_response(&Provider::Openai, &json!({ "usage": {} })),
             Usage::default()

@@ -39,11 +39,16 @@ fn base_url(agent: &str) -> Option<(String, String)> {
     match agent {
         "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
             .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
-        "codex" => codex_base_url().map(|url| ("openai_base_url".to_string(), url)),
+        "codex" => crate::hooks::init::codex_openai_base_url()
+            .map(|url| ("openai_base_url".to_string(), url)),
         "vibe" => crate::hooks::init::vibe_mistral_api_base()
             .map(|url| ("providers[mistral].api_base".to_string(), url)),
         _ => None,
     }
+}
+
+pub(crate) fn routed_through_rtk(agent: &str) -> bool {
+    base_url(agent).is_some_and(|(_, url)| loopback_hostport(&url).is_some())
 }
 
 pub(crate) fn throttled_keepalive(agent: &str, interval: Duration) -> Option<String> {
@@ -73,22 +78,6 @@ fn touch(stamp: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(stamp, b"");
-}
-
-fn codex_base_url() -> Option<String> {
-    let dir = crate::hooks::init::resolve_codex_dir().ok()?;
-    let text = std::fs::read_to_string(dir.join("config.toml")).ok()?;
-    openai_base_url_in(&text)
-}
-
-pub(crate) fn openai_base_url_in(config: &str) -> Option<String> {
-    let value: toml::Value = config.parse().ok()?;
-    value
-        .get("openai_base_url")?
-        .as_str()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_string)
 }
 
 pub(crate) fn encode(
@@ -352,23 +341,6 @@ mod tests {
             SystemTime::now() + Duration::from_secs(600),
             five_minutes
         ));
-    }
-
-    #[test]
-    fn codex_base_url_is_the_config_key_not_an_env_var() {
-        assert_eq!(
-            openai_base_url_in(
-                "model = \"gpt-5\"\nopenai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n"
-            ),
-            Some("http://127.0.0.1:8080/openai/v1".to_string())
-        );
-        assert_eq!(openai_base_url_in("model = \"gpt-5\"\n"), None);
-        assert_eq!(openai_base_url_in("openai_base_url = \"  \"\n"), None);
-        assert_eq!(openai_base_url_in("not = toml = at all"), None);
-        assert_eq!(
-            openai_base_url_in("[model_providers.openai]\nbase_url = \"http://127.0.0.1:1\"\n"),
-            None
-        );
     }
 
     #[test]

@@ -25,7 +25,11 @@ const UPSTREAM_ENV_PREFIX: &str = "RTK_PROXY_UPSTREAM_";
 pub const ANTHROPIC_UPSTREAM_NAME: &str = "anthropic";
 pub const OPENAI_UPSTREAM_NAME: &str = "openai";
 pub const MISTRAL_UPSTREAM_NAME: &str = "mistral";
-const DEFAULT_UPSTREAMS: &[(&str, &str)] = &[(MISTRAL_UPSTREAM_NAME, "https://api.mistral.ai")];
+pub const CHATGPT_UPSTREAM_NAME: &str = "chatgpt";
+const DEFAULT_UPSTREAMS: &[(&str, &str)] = &[
+    (MISTRAL_UPSTREAM_NAME, "https://api.mistral.ai"),
+    (CHATGPT_UPSTREAM_NAME, "https://chatgpt.com"),
+];
 const RESERVED_UPSTREAM_NAMES: &[&str] = &[
     ANTHROPIC_UPSTREAM_NAME,
     OPENAI_UPSTREAM_NAME,
@@ -520,7 +524,8 @@ mod tests {
     fn defaults_when_all_unset() {
         let c = Config::resolve(empty_cli(), FileConfig::default(), &[]);
         assert_eq!(c.upstreams["mistral"], "https://api.mistral.ai");
-        assert_eq!(c.upstreams.len(), 1);
+        assert_eq!(c.upstreams["chatgpt"], "https://chatgpt.com");
+        assert_eq!(c.upstreams.len(), 2);
         assert_eq!(c.bind, DEFAULT_BIND);
         assert_eq!(c.anthropic_upstream, DEFAULT_ANTHROPIC_UPSTREAM);
         assert_eq!(c.db, default_db_path());

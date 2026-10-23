@@ -13,6 +13,9 @@ pub(super) struct OnrampSpec {
 
 pub(super) trait ProxyOnramp {
     fn spec(&self) -> &'static OnrampSpec;
+    fn path(&self) -> &'static str {
+        self.spec().path
+    }
     fn current_target(&self) -> Result<Option<String>>;
     fn autostart_present(&self) -> Result<bool>;
     fn manual_line(&self, base_url: &str) -> String;
@@ -125,7 +128,7 @@ pub(super) fn offer_proxy_onramp(
         return Ok(());
     }
     let spec = onramp.spec();
-    let base_url = format!("http://{}{}", crate::llm_proxy::DEFAULT_BIND, spec.path);
+    let base_url = format!("http://{}{}", crate::llm_proxy::DEFAULT_BIND, onramp.path());
     let already = onramp.current_target()?;
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = onramp.autostart_present()?;

@@ -44,10 +44,16 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(openai_chat_completions))
+        .route("/v1/responses", post(openai_responses))
         .route("/:upstream/v1/messages", post(anthropic_messages_at))
         .route(
             "/:upstream/v1/chat/completions",
             post(openai_chat_completions_at),
+        )
+        .route("/:upstream/v1/responses", post(openai_responses_at))
+        .route(
+            "/:upstream/backend-api/codex/responses",
+            post(codex_backend_responses_at),
         )
         .route("/health", get(health))
         // Only the reads `rtk-proxy stats` performs: a route with no caller is
@@ -236,6 +242,52 @@ async fn openai_chat_completions(
         Provider::Openai,
         OPENAI_UPSTREAM_NAME,
         "/v1/chat/completions",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn openai_responses(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        OPENAI_UPSTREAM_NAME,
+        "/v1/responses",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn openai_responses_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        &upstream,
+        "/v1/responses",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn codex_backend_responses_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        &upstream,
+        "/backend-api/codex/responses",
         headers,
         body,
     )
@@ -626,7 +678,7 @@ fn routing_unknown(s: &AppState, method: &str, path: &str) -> Response {
                     "no route for {method} {path}: the routing destination is unknown. \
                      This proxy relays only its configured upstream namespaces ({namespaces}) \
                      and the bare dialect endpoints \
-                     (anthropic: /v1/messages/*, openai: /v1/chat/completions); \
+                     (anthropic: /v1/messages/*, openai: /v1/chat/completions, /v1/responses); \
                      it never picks an upstream for other paths, because sending \
                      a client's credentials to a guessed host is worse than a 404. \
                      Run this client un-proxied, or point it directly at its provider."

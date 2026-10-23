@@ -685,6 +685,13 @@ impl SseAccumulator {
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             self.merge(usage);
         }
+        if let Some(usage) = json
+            .get("response")
+            .and_then(|r| r.get("usage"))
+            .filter(|u| !u.is_null())
+        {
+            self.merge(usage);
+        }
         // Native Gemini streams usage under `usageMetadata`.
         if let Some(usage) = json.get("usageMetadata").filter(|u| !u.is_null()) {
             self.merge(usage);
@@ -695,6 +702,28 @@ impl SseAccumulator {
 
     /// Reconstruct streamed tool calls across the three dialects.
     fn feed_tool_use(&mut self, json: &serde_json::Value) {
+        if matches!(self.provider, Provider::OpenaiResponses) {
+            if json.get("type").and_then(|t| t.as_str()) == Some("response.output_item.done")
+                && json.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+            {
+                let index = json
+                    .get("output_index")
+                    .and_then(|i| i.as_i64())
+                    .unwrap_or(self.tool_buf.len() as i64);
+                let name = json
+                    .pointer("/item/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = json
+                    .pointer("/item/arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("null")
+                    .to_string();
+                self.tool_buf.insert(index, (name, arguments));
+            }
+            return;
+        }
         // Native Gemini streams a whole functionCall (name + args) per chunk.
         if matches!(self.provider, Provider::Google) {
             if let Some(parts) = json
@@ -812,6 +841,13 @@ impl SseAccumulator {
                         {
                             self.text.push_str(t);
                         }
+                    }
+                }
+            }
+            Provider::OpenaiResponses => {
+                if json.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+                    if let Some(t) = json.get("delta").and_then(|d| d.as_str()) {
+                        self.text.push_str(t);
                     }
                 }
             }

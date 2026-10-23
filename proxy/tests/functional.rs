@@ -1191,3 +1191,168 @@ data: [DONE]\n\n";
     assert_eq!(summary["total_requests"], 1);
     assert_eq!(summary["tokens_out"], 9);
 }
+
+#[tokio::test]
+async fn codex_responses_are_relayed_under_both_login_modes_and_measured() {
+    let openai = MockServer::start().await;
+    let chatgpt = MockServer::start().await;
+    let completed = json!({
+        "id": "resp_1", "object": "response", "status": "completed", "model": "gpt-5-codex",
+        "output": [
+            { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"command\":[\"ls\"]}" }
+        ],
+        "usage": { "input_tokens": 200, "output_tokens": 12,
+                   "input_tokens_details": { "cached_tokens": 150 },
+                   "output_tokens_details": { "reasoning_tokens": 4 } }
+    });
+    for s in [&openai, &chatgpt] {
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(completed.clone()))
+            .mount(s)
+            .await;
+    }
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("chatgpt".to_string(), chatgpt.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let post = |uri: &'static str, auth: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", auth)
+                    .header("user-agent", "codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)")
+                    .body(axum::body::Body::from(
+                        r#"{"model":"gpt-5-codex","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ls"}]}],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}],"stream":false,"store":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let resp = post("/openai/v1/responses", "Bearer sk-proj-key").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await["output"][0]["name"], "shell");
+    let resp = post(
+        "/chatgpt/backend-api/codex/responses",
+        "Bearer chatgpt-token",
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let resp = post("/v1/responses", "Bearer sk-proj-key").await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the bare path still means the openai upstream"
+    );
+
+    let openai_seen = openai.received_requests().await.unwrap();
+    assert_eq!(openai_seen.len(), 2);
+    assert!(openai_seen.iter().all(|r| r.url.path() == "/v1/responses"));
+    let chatgpt_seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(chatgpt_seen.len(), 1);
+    assert_eq!(chatgpt_seen[0].url.path(), "/backend-api/codex/responses");
+    assert_eq!(
+        chatgpt_seen[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer chatgpt-token"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 3);
+    assert_eq!(summary["tokens_out"], 36);
+    let metrics = store.metrics().await;
+    assert!(metrics.by_client.iter().any(|c| c.client == "codex"));
+}
+
+#[tokio::test]
+async fn a_streamed_codex_response_tallies_usage_from_response_completed() {
+    let openai = MockServer::start().await;
+    let sse = "event: response.created\n\
+data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"output_index\":0,\"delta\":\"ok\"}\n\n\
+event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\",\"arguments\":\"{}\"}}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":300,\"output_tokens\":21,\"input_tokens_details\":{\"cached_tokens\":256},\"total_tokens\":321}}}\n\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse.as_bytes(), "text/event-stream"))
+        .mount(&openai)
+        .await;
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/openai/v1/responses")
+                .header("content-type", "application/json")
+                .header("user-agent", "codex_cli_rs/0.50.0")
+                .body(axum::body::Body::from(
+                    r#"{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let relayed = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &relayed[..],
+        sse.as_bytes(),
+        "the event stream is relayed byte for byte"
+    );
+
+    let upgrade = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/openai/v1/responses")
+                .header("connection", "Upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        upgrade.status() == 405 || upgrade.status() == 404 || upgrade.status() == 502,
+        "a websocket upgrade is answered, never relayed as a websocket: {}",
+        upgrade.status()
+    );
+    assert!(
+        openai
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "POST"),
+        "the upgrade attempt must not reach the upstream as a GET"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 21);
+}
