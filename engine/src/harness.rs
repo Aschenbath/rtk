@@ -1886,7 +1886,8 @@ mod tests {
 
     #[test]
     fn the_published_coverage_table_is_the_generated_one() {
-        let doc = include_str!("../../docs/guide/resources/agent-coverage.md");
+        let doc =
+            include_str!("../../docs/guide/resources/agent-coverage.md").replace("\r\n", "\n");
         let table = coverage_markdown();
         assert!(
             doc.contains(&table),
