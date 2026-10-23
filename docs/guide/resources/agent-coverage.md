@@ -22,7 +22,7 @@ Rows are grouped by what works — output compression first, then command rewrit
 | **Copilot CLI** | `copilot-cli` | — | yes | yes | **yes** | yes | yes | yes |
 | **Hermes** | `hermes` | — | yes | yes | **yes** | yes | yes | yes |
 | **Kilo Code** | `kilocode` | — | yes | yes | **yes** | yes | — | yes |
-| **Mistral Vibe** | `vibe` | yes | yes | yes | **yes** | yes | — | — |
+| **Mistral Vibe** | `vibe` | yes | yes | yes | **yes** | yes | — | yes |
 | **Oh My Pi** | `omp` | — | yes | yes | **yes** | yes | yes | yes |
 | **OpenCode** | `opencode` | — | yes | yes | **yes** | yes | — | — |
 | **Pi** | `pi` | — | yes | yes | **yes** | yes | yes | — |

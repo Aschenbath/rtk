@@ -298,16 +298,21 @@ pub enum Forwarded {
 /// usage outcome for the stats store. `stream` (the client's `stream: true`)
 /// selects the SSE relay, which counts tokens as the bytes flow; otherwise the
 /// body is buffered and parsed once.
+pub struct UpstreamTarget {
+    pub name: String,
+    pub base: String,
+}
+
 pub async fn relay(
     state: &AppState,
-    base: &str,
+    target: &UpstreamTarget,
     path: &str,
     headers: HeaderMap,
     body: Bytes,
     provider: Provider,
     stream: bool,
 ) -> Forwarded {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let url = format!("{}{}", target.base.trim_end_matches('/'), path);
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
@@ -328,7 +333,8 @@ pub async fn relay(
         // A local worker that sent no credential borrows the one the agent is
         // already relaying, rather than needing a second copy of it.
         if state.config.relay_borrowing {
-            if let Some((name, value)) = state.relayed_auth.lend_if_missing(provider, &headers) {
+            if let Some((name, value)) = state.relayed_auth.lend_if_missing(&target.name, &headers)
+            {
                 req = req.header(name, value);
             }
         }
@@ -873,6 +879,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             anthropic_upstream: "https://api.anthropic.com".into(),
             openai_upstream: "https://api.openai.com".into(),
+            upstreams: Default::default(),
             ccr,
             compression: "off".into(),
             pixel_compress: Default::default(),

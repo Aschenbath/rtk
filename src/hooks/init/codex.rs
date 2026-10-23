@@ -707,7 +707,7 @@ pub(super) fn run_codex_mode_with_paths(
     Ok(())
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         user_dirs::env_path("CODEX_HOME").map(PathBuf::from),
         user_dirs::home(),

@@ -24,23 +24,39 @@ pub(super) fn run() {
 
 pub(crate) fn response_for(agent: &str) -> Option<String> {
     let profile = rtk_engine::harness::profile(agent)?;
-    let keepalive = base_url(agent).and_then(|(var, url)| ensure_proxy_at(var, &url));
+    let keepalive = base_url(agent).and_then(|(setting, url)| ensure_proxy_at(&setting, &url));
+    if let Some(message) = keepalive.as_deref().filter(|_| agent != "claude-code") {
+        let _ = writeln!(std::io::stderr(), "{message}");
+    }
     let context = crate::core::pipeline_config::session_start_text(
         &crate::core::pipeline_config::load().resolved,
     );
     encode(profile, keepalive.as_deref(), context.as_deref()).map(|v| v.to_string())
 }
 
-fn base_url(agent: &str) -> Option<(&'static str, String)> {
+fn base_url(agent: &str) -> Option<(String, String)> {
     match agent {
-        "claude-code" => {
-            crate::core::user_env::var("ANTHROPIC_BASE_URL").map(|url| ("ANTHROPIC_BASE_URL", url))
-        }
-        "codex" => {
-            crate::core::user_env::var("OPENAI_BASE_URL").map(|url| ("OPENAI_BASE_URL", url))
-        }
+        "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
+            .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
+        "codex" => codex_base_url().map(|url| ("openai_base_url".to_string(), url)),
         _ => None,
     }
+}
+
+fn codex_base_url() -> Option<String> {
+    let dir = crate::hooks::init::resolve_codex_dir().ok()?;
+    let text = std::fs::read_to_string(dir.join("config.toml")).ok()?;
+    openai_base_url_in(&text)
+}
+
+pub(crate) fn openai_base_url_in(config: &str) -> Option<String> {
+    let value: toml::Value = config.parse().ok()?;
+    value
+        .get("openai_base_url")?
+        .as_str()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn encode(
@@ -64,12 +80,19 @@ pub(crate) fn encode(
             }
             Some(payload)
         }
-        ("codex", _, Some(context)) => Some(json!({
-            "hookSpecificOutput": {
-                "hookEventName": crate::hooks::constants::SESSION_START_KEY,
-                "additionalContext": context,
-            }
-        })),
+        ("codex", keepalive, context) => {
+            let text = [keepalive, context]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Some(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": crate::hooks::constants::SESSION_START_KEY,
+                    "additionalContext": text,
+                }
+            }))
+        }
         ("cursor", _, Some(context)) => Some(json!({ "additional_context": context })),
         ("antigravity", _, Some(context)) => Some(json!({
             "injectSteps": [{ "systemMessage": context }]
@@ -269,17 +292,34 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_names_the_variable() {
+    fn spawn_failure_names_the_setting() {
         let out = ensure_proxy_impl(
-            "OPENAI_BASE_URL",
+            "openai_base_url",
             "http://127.0.0.1:8080",
             |_| false,
             |_| Err(anyhow::anyhow!("no binary")),
             Duration::ZERO,
         );
         let message = out.unwrap();
-        assert!(message.contains("OPENAI_BASE_URL points at"));
+        assert!(message.contains("openai_base_url points at"));
         assert!(message.contains("no binary"));
+    }
+
+    #[test]
+    fn codex_base_url_is_the_config_key_not_an_env_var() {
+        assert_eq!(
+            openai_base_url_in(
+                "model = \"gpt-5\"\nopenai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n"
+            ),
+            Some("http://127.0.0.1:8080/openai/v1".to_string())
+        );
+        assert_eq!(openai_base_url_in("model = \"gpt-5\"\n"), None);
+        assert_eq!(openai_base_url_in("openai_base_url = \"  \"\n"), None);
+        assert_eq!(openai_base_url_in("not = toml = at all"), None);
+        assert_eq!(
+            openai_base_url_in("[model_providers.openai]\nbase_url = \"http://127.0.0.1:1\"\n"),
+            None
+        );
     }
 
     #[test]
@@ -299,7 +339,13 @@ mod tests {
         let codex = encode(profile("codex"), None, Some("be terse")).unwrap();
         assert_eq!(codex["hookSpecificOutput"]["hookEventName"], "SessionStart");
         assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "be terse");
-        assert_eq!(encode(profile("codex"), Some("started"), None), None);
+        let codex = encode(profile("codex"), Some("started"), None).unwrap();
+        assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "started");
+        let codex = encode(profile("codex"), Some("started"), Some("be terse")).unwrap();
+        assert_eq!(
+            codex["hookSpecificOutput"]["additionalContext"],
+            "started\n\nbe terse"
+        );
 
         assert_eq!(
             encode(profile("cursor"), None, Some("be terse")).unwrap(),

@@ -622,14 +622,29 @@ pub fn no_data_hint() -> String {
 pub struct ProxyAgent {
     /// The `rtk <name>` subcommand, and the binary it execs.
     pub name: &'static str,
-    /// The base-URL variable this agent honours.
-    pub base_url_var: &'static str,
+    pub label: &'static str,
+    pub redirect: Redirect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redirect {
+    Env { var: &'static str },
 }
 
 pub const PROXY_AGENTS: &[ProxyAgent] = &[ProxyAgent {
     name: "claude",
-    base_url_var: "ANTHROPIC_BASE_URL",
+    label: "Claude Code",
+    redirect: Redirect::Env {
+        var: "ANTHROPIC_BASE_URL",
+    },
 }];
+
+fn detected_agents() -> Vec<&'static ProxyAgent> {
+    PROXY_AGENTS
+        .iter()
+        .filter(|agent| tool_exists(agent.name))
+        .collect()
+}
 
 pub fn resolve_agent(name: &str) -> Option<&'static ProxyAgent> {
     PROXY_AGENTS.iter().find(|a| a.name == name)
@@ -673,7 +688,6 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     }
     let bind = daemon_bind();
     let base_url = format!("http://{bind}");
-    let existing = std::env::var(agent.base_url_var).ok();
     let daemon_up = match ensure_running(&bind) {
         Ok(_) => true,
         Err(e) => {
@@ -683,30 +697,34 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     };
     let mut cmd = Command::new(agent.name);
     cmd.args(args);
-    match launch_plan(existing.as_deref(), &base_url, daemon_up) {
-        LaunchPlan::Proxied => {
-            cmd.env(agent.base_url_var, &base_url);
-        }
-        LaunchPlan::KeepExisting => {
-            eprintln!(
-                "rtk: {} is already set — leaving it; unset it to route through the rtk proxy",
-                agent.base_url_var
-            );
-        }
-        LaunchPlan::Unproxied => {
-            eprintln!(
-                "rtk: launching `{}` unproxied — API traffic will not be compressed. \
-                 Install the daemon (rtk llm-proxy setup) to enable it.",
-                agent.name
-            );
-        }
-        LaunchPlan::UnproxiedClear => {
-            eprintln!(
-                "rtk: {} pointed at the rtk proxy, which is not running — launching `{}` \
-                 unproxied instead.",
-                agent.base_url_var, agent.name
-            );
-            cmd.env_remove(agent.base_url_var);
+    match agent.redirect {
+        Redirect::Env { var } => {
+            let existing = std::env::var(var).ok();
+            match launch_plan(existing.as_deref(), &base_url, daemon_up) {
+                LaunchPlan::Proxied => {
+                    cmd.env(var, &base_url);
+                }
+                LaunchPlan::KeepExisting => {
+                    eprintln!(
+                        "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
+                    );
+                }
+                LaunchPlan::Unproxied => {
+                    eprintln!(
+                        "rtk: launching `{}` unproxied — API traffic will not be compressed. \
+                         Install the daemon (rtk llm-proxy setup) to enable it.",
+                        agent.name
+                    );
+                }
+                LaunchPlan::UnproxiedClear => {
+                    eprintln!(
+                        "rtk: {var} pointed at the rtk proxy, which is not running — launching `{}` \
+                         unproxied instead.",
+                        agent.name
+                    );
+                    cmd.env_remove(var);
+                }
+            }
         }
     }
 
@@ -725,20 +743,19 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     }
 }
 
-fn detect_claude_code() -> bool {
-    tool_exists("claude")
-}
-
 fn run_setup() -> Result<()> {
     let bin = locate_binary()?;
     println!("rtk-proxy binary ready: {}", bin.display());
-    if detect_claude_code() {
-        println!(
-            "detected: claude (Claude Code) -- run `rtk init` to route it through the proxy, or `eval \"$(rtk llm-proxy start --env)\"` for one shell"
-        );
-    } else {
+    let detected = detected_agents();
+    if detected.is_empty() {
         println!(
             "no known AI CLI detected on PATH -- `rtk llm-proxy start --env` will still print the export line to set manually"
+        );
+    }
+    for agent in &detected {
+        println!(
+            "detected: {} ({}) -- run `rtk init` to route it through the proxy, or `eval \"$(rtk llm-proxy start --env)\"` for one shell",
+            agent.name, agent.label
         );
     }
     let names: Vec<&str> = PROXY_AGENTS.iter().map(|a| a.name).collect();
@@ -764,14 +781,14 @@ fn run_start(bind: Option<&str>, env_only: bool) -> Result<()> {
         println!("rtk-proxy up on {bind}");
         println!("  logs: {}", paths.log.display());
         println!("  db:   {}", paths.db.display());
-        if detect_claude_code() {
+        for agent in detected_agents() {
             println!();
-            println!("point Claude Code at it:");
+            println!("point {} at it:", agent.label);
             if let Some(export) = bind_export_hint(&bind) {
                 println!("  {export}");
             }
             println!("  eval \"$(rtk llm-proxy start --env)\"");
-            println!("  then: claude [claude args...]");
+            println!("  then: {} [{} args...]", agent.name, agent.name);
         }
     } else {
         println!("already running on {bind}");
@@ -837,12 +854,19 @@ pub(crate) fn ensure_running(bind: &str) -> Result<Option<DaemonPaths>> {
     );
 }
 
-fn env_line(bind: &str) -> String {
-    format!("export ANTHROPIC_BASE_URL=http://{bind}")
+fn env_lines(bind: &str) -> Vec<String> {
+    PROXY_AGENTS
+        .iter()
+        .map(|agent| match agent.redirect {
+            Redirect::Env { var } => format!("export {var}=http://{bind}"),
+        })
+        .collect()
 }
 
 fn emit_env(bind: &str) {
-    println!("{}", env_line(bind));
+    for line in env_lines(bind) {
+        println!("{line}");
+    }
 }
 
 /// Build the argument vector for a forwarded subcommand: `<subcmd> [--bind
@@ -937,19 +961,47 @@ mod tests {
         }
         for agent in PROXY_AGENTS {
             assert!(!agent.name.is_empty());
-            assert!(
-                agent.base_url_var.ends_with("_BASE_URL"),
-                "{} must name a base-URL variable",
-                agent.name
-            );
+            match agent.redirect {
+                Redirect::Env { var } => assert!(
+                    var.ends_with("_BASE_URL"),
+                    "{} must name a base-URL variable",
+                    agent.name
+                ),
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn every_launcher_agrees_with_its_harness_profile() {
+        use rtk_engine::harness::ConfigChannel;
+        for agent in PROXY_AGENTS {
+            let harness = match agent.name {
+                "claude" => "claude-code",
+                other => other,
+            };
+            let profile = rtk_engine::harness::profile(harness)
+                .unwrap_or_else(|| panic!("{} names no harness profile", agent.name));
+            assert_eq!(profile.name, agent.label);
+            match (agent.redirect, profile.base_url_config) {
+                (Redirect::Env { var }, Some(ConfigChannel::Env { var: documented })) => {
+                    assert_eq!(var, documented, "{}", agent.name)
+                }
+                (redirect, channel) => {
+                    panic!(
+                        "{}: launcher {redirect:?} disagrees with profile {channel:?}",
+                        agent.name
+                    )
+                }
+            }
         }
     }
 
     #[test]
-    fn env_line_points_at_the_bound_address() {
+    fn env_lines_point_at_the_bound_address() {
         assert_eq!(
-            env_line("127.0.0.1:8080"),
-            "export ANTHROPIC_BASE_URL=http://127.0.0.1:8080"
+            env_lines("127.0.0.1:8080"),
+            vec!["export ANTHROPIC_BASE_URL=http://127.0.0.1:8080".to_string()]
         );
     }
 
