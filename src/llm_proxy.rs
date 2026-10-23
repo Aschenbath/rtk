@@ -677,6 +677,44 @@ pub const PROXY_AGENTS: &[ProxyAgent] = &[
     },
 ];
 
+pub struct Unproxyable {
+    pub names: &'static [&'static str],
+    pub label: &'static str,
+    pub harness: &'static str,
+    pub reason: &'static str,
+}
+
+pub const UNPROXYABLE: &[Unproxyable] = &[
+    Unproxyable {
+        names: &["cursor-agent", "cursor"],
+        label: "Cursor",
+        harness: "cursor",
+        reason: "every model request goes through Cursor's servers and the CLI has no base-URL override (cursor.com/docs, checked 2026-10-23)",
+    },
+    Unproxyable {
+        names: &["agy", "antigravity"],
+        label: "Antigravity",
+        harness: "antigravity",
+        reason: "sign-in is OAuth only and there is no base-URL override (Google staff on discuss.ai.google.dev, June 2026)",
+    },
+];
+
+impl Unproxyable {
+    fn line(&self) -> String {
+        format!(
+            "{} cannot be routed through the RTK proxy: {} — RTK's hooks still run",
+            self.label, self.reason
+        )
+    }
+}
+
+pub fn proxy_unavailable_line(harness: &str) -> Option<String> {
+    UNPROXYABLE
+        .iter()
+        .find(|agent| agent.harness == harness)
+        .map(|agent| format!("LLM proxy: {}", agent.line()))
+}
+
 fn proxy_url(redirect: Redirect, bind: &str) -> Option<String> {
     match redirect {
         Redirect::Env { .. } => Some(format!("http://{bind}")),
@@ -907,6 +945,11 @@ fn run_setup() -> Result<()> {
                 "detected: {} ({}) -- `rtk {}` routes one session through the proxy; run `{setup}` to route every session",
                 agent.name, agent.label, agent.name
             ),
+        }
+    }
+    for agent in UNPROXYABLE {
+        if let Some(name) = agent.names.iter().find(|name| tool_exists(name)) {
+            println!("detected: {name} ({}) -- {}", agent.label, agent.line());
         }
     }
     let names: Vec<&str> = PROXY_AGENTS.iter().map(|a| a.name).collect();
@@ -1160,6 +1203,38 @@ mod tests {
                     assert!(setup.starts_with("rtk init"), "{}", agent.name);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn an_unproxyable_agent_is_named_with_its_reason_and_never_resolves() {
+        for agent in UNPROXYABLE {
+            for name in agent.names {
+                assert!(resolve_agent(name).is_none(), "{name}");
+            }
+            assert!(!agent.reason.is_empty());
+            let line = proxy_unavailable_line(agent.harness).expect(agent.harness);
+            assert!(line.starts_with("LLM proxy: "), "{line}");
+            assert!(line.contains(agent.label), "{line}");
+            assert!(line.contains("hooks still run"), "{line}");
+        }
+        assert_eq!(proxy_unavailable_line("claude-code"), None);
+        assert_eq!(proxy_unavailable_line("codex"), None);
+        assert_eq!(proxy_unavailable_line("vibe"), None);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn an_unproxyable_agent_has_no_base_url_channel_in_its_profile() {
+        for agent in UNPROXYABLE {
+            let profile = rtk_engine::harness::profile(agent.harness)
+                .unwrap_or_else(|| panic!("{} names no harness profile", agent.label));
+            assert_eq!(profile.name, agent.label);
+            assert_eq!(
+                profile.base_url_config, None,
+                "{}: a channel exists, so it belongs in PROXY_AGENTS, not UNPROXYABLE",
+                agent.label
+            );
         }
     }
 
