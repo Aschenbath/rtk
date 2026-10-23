@@ -389,6 +389,8 @@ pub fn detect_client(user_agent: Option<&str>) -> Option<String> {
         Some("aider".to_string())
     } else if ua.contains("cline") {
         Some("cline".to_string())
+    } else if ua.contains("mistral-vibe") {
+        Some("vibe".to_string())
     } else if ua.contains("anthropic") {
         Some("anthropic-sdk".to_string())
     } else if ua.is_empty() {
@@ -657,6 +659,14 @@ mod tests {
         assert_eq!(
             detect_client(Some("codex_cli_rs/0.2 (anthropic)")),
             Some("codex".to_string())
+        );
+        assert_eq!(
+            detect_client(Some("mistral-client-python/Mistral-Vibe/1.2.3")),
+            Some("vibe".to_string())
+        );
+        assert_eq!(
+            detect_client(Some("Mistral-Vibe/1.2.3")),
+            Some("vibe".to_string())
         );
         assert_eq!(
             detect_client(Some("Windsurf/1.1 anthropic-sdk")),

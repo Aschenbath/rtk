@@ -24,6 +24,8 @@ const DEFAULT_UPSTREAM_RETRIES: u32 = 2;
 const UPSTREAM_ENV_PREFIX: &str = "RTK_PROXY_UPSTREAM_";
 pub const ANTHROPIC_UPSTREAM_NAME: &str = "anthropic";
 pub const OPENAI_UPSTREAM_NAME: &str = "openai";
+pub const MISTRAL_UPSTREAM_NAME: &str = "mistral";
+const DEFAULT_UPSTREAMS: &[(&str, &str)] = &[(MISTRAL_UPSTREAM_NAME, "https://api.mistral.ai")];
 const RESERVED_UPSTREAM_NAMES: &[&str] = &[
     ANTHROPIC_UPSTREAM_NAME,
     OPENAI_UPSTREAM_NAME,
@@ -327,7 +329,11 @@ impl Config {
     /// Merge the three layers (CLI wins over file wins over default). Pure — the
     /// testable core of [`Config::from_cli`].
     fn resolve(cli: StartArgs, file: FileConfig, env: &[(String, String)]) -> Self {
-        let mut upstreams = file.upstreams;
+        let mut upstreams: BTreeMap<String, String> = DEFAULT_UPSTREAMS
+            .iter()
+            .map(|(name, url)| (name.to_string(), url.to_string()))
+            .collect();
+        upstreams.extend(file.upstreams);
         for (key, value) in env {
             let Some(name) = key.strip_prefix(UPSTREAM_ENV_PREFIX) else {
                 continue;
@@ -513,7 +519,8 @@ mod tests {
     #[test]
     fn defaults_when_all_unset() {
         let c = Config::resolve(empty_cli(), FileConfig::default(), &[]);
-        assert!(c.upstreams.is_empty());
+        assert_eq!(c.upstreams["mistral"], "https://api.mistral.ai");
+        assert_eq!(c.upstreams.len(), 1);
         assert_eq!(c.bind, DEFAULT_BIND);
         assert_eq!(c.anthropic_upstream, DEFAULT_ANTHROPIC_UPSTREAM);
         assert_eq!(c.db, default_db_path());
@@ -585,9 +592,16 @@ mod tests {
             ),
             ("RTK_PROXY_UPSTREAM_BLANK".to_string(), "  ".to_string()),
             ("RTK_PROXY_BIND".to_string(), "127.0.0.1:1".to_string()),
+            (
+                "RTK_PROXY_UPSTREAM_MISTRAL".to_string(),
+                "http://127.0.0.1:7".to_string(),
+            ),
         ];
         let c = Config::resolve(empty_cli(), file, &env);
-        assert_eq!(c.upstreams["mistral"], "https://api.mistral.ai");
+        assert_eq!(
+            c.upstreams["mistral"], "http://127.0.0.1:7",
+            "the built-in default yields to the file and the environment"
+        );
         assert_eq!(
             c.upstreams["acme"], "http://127.0.0.1:9",
             "env wins over the file"

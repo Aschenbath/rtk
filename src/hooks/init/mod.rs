@@ -74,6 +74,7 @@ pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
+pub(crate) use vibe::{VIBE_PROXY_PATH, mistral_api_base as vibe_mistral_api_base};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
 
 // Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.

@@ -1082,3 +1082,112 @@ async fn a_named_upstream_owns_its_namespace_and_nothing_else() {
         .collect();
     assert_eq!(anthropic_paths, vec!["/v1/messages"]);
 }
+
+#[tokio::test]
+async fn a_vibe_request_reaches_mistral_and_is_recorded_under_its_own_name() {
+    let anthropic = MockServer::start().await;
+    let mistral = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-1", "object": "chat.completion", "model": "devstral-medium-latest",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127,
+                      "prompt_tokens_details": {"cached_tokens": 100}}
+        })))
+        .mount(&mistral)
+        .await;
+    let mut c = cfg(&anthropic.uri(), false);
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mistral/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer mistral-key")
+                .header("user-agent", "mistral-client-python/Mistral-Vibe/1.2.3")
+                .body(axum::body::Body::from(
+                    r#"{"model":"devstral-medium-latest","messages":[{"role":"user","content":"hi"}],"stream":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        body_json(resp).await["choices"][0]["message"]["content"],
+        "ok"
+    );
+
+    let seen = mistral.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].url.path(), "/v1/chat/completions");
+    assert_eq!(
+        seen[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer mistral-key"
+    );
+    assert!(anthropic.received_requests().await.unwrap().is_empty());
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 7);
+    let metrics = store.metrics().await;
+    assert!(
+        metrics.by_client.iter().any(|c| c.client == "vibe"),
+        "the client is recorded as vibe: {:?}",
+        metrics.by_client
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_mistral_reply_tallies_its_final_usage_chunk() {
+    let mistral = MockServer::start().await;
+    let sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":9,\"total_tokens\":129,\"prompt_tokens_details\":{\"cached_tokens\":64}}}\n\n\
+data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse.as_bytes(), "text/event-stream"))
+        .mount(&mistral)
+        .await;
+    let mut c = cfg(&mistral.uri(), false);
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mistral/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("user-agent", "Mistral-Vibe/1.2.3")
+                .body(axum::body::Body::from(
+                    r#"{"model":"devstral-medium-latest","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let relayed = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&relayed).ends_with("data: [DONE]\n\n"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 9);
+}

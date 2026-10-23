@@ -8,7 +8,8 @@
 //! returns silence rather than disrupting the session.
 
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use rtk_engine::harness::{Channel, HarnessProfile};
@@ -39,8 +40,39 @@ fn base_url(agent: &str) -> Option<(String, String)> {
         "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
             .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
         "codex" => codex_base_url().map(|url| ("openai_base_url".to_string(), url)),
+        "vibe" => crate::hooks::init::vibe_mistral_api_base()
+            .map(|url| ("providers[mistral].api_base".to_string(), url)),
         _ => None,
     }
+}
+
+pub(crate) fn throttled_keepalive(agent: &str, interval: Duration) -> Option<String> {
+    let (setting, url) = base_url(agent)?;
+    let stamp = crate::core::user_dirs::config()?
+        .join("llm-proxy")
+        .join(format!("keepalive.{agent}"));
+    if !stamp_due(&stamp, SystemTime::now(), interval) {
+        return None;
+    }
+    touch(&stamp);
+    ensure_proxy_at(&setting, &url)
+}
+
+fn stamp_due(stamp: &Path, now: SystemTime, interval: Duration) -> bool {
+    match std::fs::metadata(stamp).and_then(|m| m.modified()) {
+        Ok(modified) => now
+            .duration_since(modified)
+            .map(|age| age >= interval)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+fn touch(stamp: &Path) {
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(stamp, b"");
 }
 
 fn codex_base_url() -> Option<String> {
@@ -303,6 +335,23 @@ mod tests {
         let message = out.unwrap();
         assert!(message.contains("openai_base_url points at"));
         assert!(message.contains("no binary"));
+    }
+
+    #[test]
+    fn the_throttle_fires_on_a_missing_or_old_stamp_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = dir.path().join("llm-proxy").join("keepalive.vibe");
+        let five_minutes = Duration::from_secs(300);
+        assert!(stamp_due(&stamp, SystemTime::now(), five_minutes));
+        touch(&stamp);
+        assert!(stamp.is_file());
+        assert!(!stamp_due(&stamp, SystemTime::now(), five_minutes));
+        assert!(stamp_due(&stamp, SystemTime::now(), Duration::ZERO));
+        assert!(stamp_due(
+            &stamp,
+            SystemTime::now() + Duration::from_secs(600),
+            five_minutes
+        ));
     }
 
     #[test]

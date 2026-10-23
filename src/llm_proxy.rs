@@ -626,18 +626,45 @@ pub struct ProxyAgent {
     pub redirect: Redirect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Redirect {
-    Env { var: &'static str },
+    Env {
+        var: &'static str,
+    },
+    ConfigFile {
+        file: &'static str,
+        path: &'static str,
+        setup: &'static str,
+        read: fn() -> Option<String>,
+    },
 }
 
-pub const PROXY_AGENTS: &[ProxyAgent] = &[ProxyAgent {
-    name: "claude",
-    label: "Claude Code",
-    redirect: Redirect::Env {
-        var: "ANTHROPIC_BASE_URL",
+pub const PROXY_AGENTS: &[ProxyAgent] = &[
+    ProxyAgent {
+        name: "claude",
+        label: "Claude Code",
+        redirect: Redirect::Env {
+            var: "ANTHROPIC_BASE_URL",
+        },
     },
-}];
+    ProxyAgent {
+        name: "vibe",
+        label: "Mistral Vibe",
+        redirect: Redirect::ConfigFile {
+            file: "~/.vibe/config.toml",
+            path: crate::hooks::init::VIBE_PROXY_PATH,
+            setup: "rtk init -g --agent vibe",
+            read: crate::hooks::init::vibe_mistral_api_base,
+        },
+    },
+];
+
+fn proxy_url(redirect: Redirect, bind: &str) -> String {
+    match redirect {
+        Redirect::Env { .. } => format!("http://{bind}"),
+        Redirect::ConfigFile { path, .. } => format!("http://{bind}{path}"),
+    }
+}
 
 fn detected_agents() -> Vec<&'static ProxyAgent> {
     PROXY_AGENTS
@@ -676,6 +703,24 @@ fn launch_plan(existing: Option<&str>, proxy_url: &str, daemon_up: bool) -> Laun
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum ConfigLaunch {
+    Proxied,
+    NotConfigured,
+    Foreign,
+    DeadProxy,
+}
+
+fn config_launch(target: Option<&str>, proxy_url: &str, daemon_up: bool) -> ConfigLaunch {
+    let same = |url: &str| url.trim().trim_end_matches('/') == proxy_url.trim_end_matches('/');
+    match target {
+        Some(url) if same(url) && daemon_up => ConfigLaunch::Proxied,
+        Some(url) if same(url) => ConfigLaunch::DeadProxy,
+        Some(url) if !url.trim().is_empty() => ConfigLaunch::Foreign,
+        _ => ConfigLaunch::NotConfigured,
+    }
+}
+
 /// Start the daemon if possible, point this agent at it, and hand over the
 /// process. On Unix this `exec`s, so signals, stdio and the exit code behave
 /// exactly as if the agent had been launched directly. Never blocks the
@@ -687,7 +732,7 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
         return Ok(127);
     }
     let bind = daemon_bind();
-    let base_url = format!("http://{bind}");
+    let base_url = proxy_url(agent.redirect, &bind);
     let daemon_up = match ensure_running(&bind) {
         Ok(_) => true,
         Err(e) => {
@@ -726,6 +771,32 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
                 }
             }
         }
+        Redirect::ConfigFile {
+            file, setup, read, ..
+        } => match config_launch(read().as_deref(), &base_url, daemon_up) {
+            ConfigLaunch::Proxied => {}
+            ConfigLaunch::NotConfigured => {
+                eprintln!(
+                    "rtk: launching `{}` unproxied — API traffic will not be compressed. \
+                     Run `{setup}` to route it through the rtk proxy.",
+                    agent.name
+                );
+            }
+            ConfigLaunch::Foreign => {
+                eprintln!(
+                    "rtk: {file} already routes {} elsewhere — leaving it; run `{setup}` to route it through the rtk proxy",
+                    agent.label
+                );
+            }
+            ConfigLaunch::DeadProxy => {
+                eprintln!(
+                    "rtk: {file} points {} at the rtk proxy, which is not running and could not be started — \
+                     run `rtk llm-proxy start`, or `{setup} --uninstall` to stop routing it",
+                    agent.label
+                );
+                return Ok(1);
+            }
+        },
     }
 
     #[cfg(unix)]
@@ -753,10 +824,16 @@ fn run_setup() -> Result<()> {
         );
     }
     for agent in &detected {
-        println!(
-            "detected: {} ({}) -- run `rtk init` to route it through the proxy, or `eval \"$(rtk llm-proxy start --env)\"` for one shell",
-            agent.name, agent.label
-        );
+        match agent.redirect {
+            Redirect::Env { .. } => println!(
+                "detected: {} ({}) -- run `rtk init` to route it through the proxy, or `eval \"$(rtk llm-proxy start --env)\"` for one shell",
+                agent.name, agent.label
+            ),
+            Redirect::ConfigFile { setup, .. } => println!(
+                "detected: {} ({}) -- run `{setup}` to route it through the proxy",
+                agent.name, agent.label
+            ),
+        }
     }
     let names: Vec<&str> = PROXY_AGENTS.iter().map(|a| a.name).collect();
     println!(
@@ -784,11 +861,19 @@ fn run_start(bind: Option<&str>, env_only: bool) -> Result<()> {
         for agent in detected_agents() {
             println!();
             println!("point {} at it:", agent.label);
-            if let Some(export) = bind_export_hint(&bind) {
-                println!("  {export}");
+            match agent.redirect {
+                Redirect::Env { .. } => {
+                    if let Some(export) = bind_export_hint(&bind) {
+                        println!("  {export}");
+                    }
+                    println!("  eval \"$(rtk llm-proxy start --env)\"");
+                    println!("  then: {} [{} args...]", agent.name, agent.name);
+                }
+                Redirect::ConfigFile { setup, .. } => {
+                    println!("  {setup}");
+                    println!("  then: rtk {} [{} args...]", agent.name, agent.name);
+                }
             }
-            println!("  eval \"$(rtk llm-proxy start --env)\"");
-            println!("  then: {} [{} args...]", agent.name, agent.name);
         }
     } else {
         println!("already running on {bind}");
@@ -857,8 +942,9 @@ pub(crate) fn ensure_running(bind: &str) -> Result<Option<DaemonPaths>> {
 fn env_lines(bind: &str) -> Vec<String> {
     PROXY_AGENTS
         .iter()
-        .map(|agent| match agent.redirect {
-            Redirect::Env { var } => format!("export {var}=http://{bind}"),
+        .filter_map(|agent| match agent.redirect {
+            Redirect::Env { var } => Some(format!("export {var}=http://{bind}")),
+            Redirect::ConfigFile { .. } => None,
         })
         .collect()
 }
@@ -951,9 +1037,18 @@ mod tests {
     #[test]
     fn only_verified_agents_get_a_subcommand() {
         assert!(resolve_agent("claude").is_some());
+        assert!(resolve_agent("vibe").is_some());
         // No base-URL override exists for these, so `rtk cursor` must stay
         // plain passthrough rather than pretending to route.
-        for absent in ["cursor", "windsurf", "cline", "codex", "opencode"] {
+        for absent in [
+            "cursor",
+            "windsurf",
+            "cline",
+            "codex",
+            "opencode",
+            "antigravity",
+            "agy",
+        ] {
             assert!(
                 resolve_agent(absent).is_none(),
                 "{absent} has no verified redirection; it must not resolve"
@@ -967,8 +1062,50 @@ mod tests {
                     "{} must name a base-URL variable",
                     agent.name
                 ),
+                Redirect::ConfigFile {
+                    file, path, setup, ..
+                } => {
+                    assert!(file.ends_with(".toml"), "{}", agent.name);
+                    assert!(
+                        path.starts_with('/') && !path.ends_with('/'),
+                        "{}",
+                        agent.name
+                    );
+                    assert!(setup.starts_with("rtk init"), "{}", agent.name);
+                }
             }
         }
+    }
+
+    #[test]
+    fn a_config_file_agent_is_never_launched_at_a_dead_proxy() {
+        let ours = "http://127.0.0.1:8080/mistral/v1";
+        assert_eq!(config_launch(None, ours, true), ConfigLaunch::NotConfigured);
+        assert_eq!(
+            config_launch(Some(""), ours, true),
+            ConfigLaunch::NotConfigured
+        );
+        assert_eq!(config_launch(Some(ours), ours, true), ConfigLaunch::Proxied);
+        assert_eq!(
+            config_launch(Some("http://127.0.0.1:8080/mistral/v1/"), ours, true),
+            ConfigLaunch::Proxied
+        );
+        assert_eq!(
+            config_launch(Some(ours), ours, false),
+            ConfigLaunch::DeadProxy
+        );
+        assert_eq!(
+            config_launch(Some("https://api.mistral.ai/v1"), ours, true),
+            ConfigLaunch::Foreign
+        );
+        assert_eq!(
+            proxy_url(resolve_agent("vibe").unwrap().redirect, "127.0.0.1:8080"),
+            ours
+        );
+        assert_eq!(
+            proxy_url(resolve_agent("claude").unwrap().redirect, "127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[cfg(feature = "engine")]
@@ -987,6 +1124,16 @@ mod tests {
                 (Redirect::Env { var }, Some(ConfigChannel::Env { var: documented })) => {
                     assert_eq!(var, documented, "{}", agent.name)
                 }
+                (
+                    Redirect::ConfigFile { file, .. },
+                    Some(ConfigChannel::ProviderTable {
+                        file: documented, ..
+                    }),
+                ) => assert!(
+                    file.ends_with(documented),
+                    "{}: {file} vs {documented}",
+                    agent.name
+                ),
                 (redirect, channel) => {
                     panic!(
                         "{}: launcher {redirect:?} disagrees with profile {channel:?}",

@@ -4,6 +4,8 @@ pub(super) struct OnrampSpec {
     pub label: &'static str,
     pub config: &'static str,
     pub key: &'static str,
+    pub path: &'static str,
+    pub manual_option: &'static str,
     pub autostart_option: Option<&'static str>,
     pub autostart_done: &'static str,
     pub autostart_persistence: &'static str,
@@ -21,6 +23,8 @@ pub(super) const CLAUDE_SPEC: OnrampSpec = OnrampSpec {
     label: "Claude Code",
     config: "settings.json",
     key: "env.ANTHROPIC_BASE_URL",
+    path: "",
+    manual_option: "Neither — print the export line; settings.json is not touched",
     autostart_option: Some(
         "SessionStart hook — start it automatically when a Claude session begins (recommended)",
     ),
@@ -121,7 +125,7 @@ pub(super) fn offer_proxy_onramp(
         return Ok(());
     }
     let spec = onramp.spec();
-    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let base_url = format!("http://{}{}", crate::llm_proxy::DEFAULT_BIND, spec.path);
     let already = onramp.current_target()?;
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = onramp.autostart_present()?;
@@ -172,13 +176,7 @@ pub(super) fn offer_proxy_onramp(
         Persistence::Service,
         "Background service — `rtk llm-proxy service install`".to_string(),
     ));
-    options.push((
-        Persistence::Manual,
-        format!(
-            "Neither — print the export line; {} is not touched",
-            spec.config
-        ),
-    ));
+    options.push((Persistence::Manual, spec.manual_option.to_string()));
     eprintln!("  How should the daemon come back after a reboot?");
     for (i, (_, text)) in options.iter().enumerate() {
         eprintln!("    {}) {text}", i + 1);

@@ -377,6 +377,7 @@ async fn handle(
             record_usage(
                 &s,
                 provider,
+                &target.name,
                 path,
                 &model,
                 tokens_in,
@@ -400,6 +401,7 @@ async fn handle(
             if s.store.is_some() {
                 let s2 = s.clone();
                 let path = path.to_string();
+                let upstream = target.name.clone();
                 let saved_by_stage = saved_by_stage.clone();
                 let (project, session) = (project.clone(), session.clone());
                 let routed_from = routed_from.clone();
@@ -408,6 +410,7 @@ async fn handle(
                         record_usage(
                             &s2,
                             provider,
+                            &upstream,
                             &path,
                             &model,
                             tokens_in,
@@ -434,6 +437,7 @@ async fn handle(
 fn record_usage(
     s: &AppState,
     provider: Provider,
+    upstream: &str,
     path: &str,
     model: &str,
     tokens_in: i64,
@@ -500,6 +504,7 @@ fn record_usage(
     let row = crate::store::UsageRow {
         ts: chrono::Utc::now().to_rfc3339(),
         provider: provider.as_str().to_string(),
+        upstream: Some(upstream.to_string()),
         model: model.to_string(),
         tokens_in,
         tokens_out: outcome.tokens_output,
