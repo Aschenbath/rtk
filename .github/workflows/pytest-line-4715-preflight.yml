@@ -1,0 +1,172 @@
+name: pytest line 4715 preflight
+
+on:
+  push:
+    branches: [ci/pytest-line-4715-preflight]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pytest-line-4715-preflight
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'Aschenbath/rtk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+      EXPECTED_BASE: e05c7bdfacfcfe1f845d11f47339e4eae63eb3f5
+      EXPECTED_PATCH: c006a611c8a3a5b569e65c6674cd2e1487f0ede593b79427d2ff033ddf123228
+      EXPECTED_TREE: b47428074aaa5b9adfd5066b4116ba6aa7322d41
+      EXPECTED_NATIVE: fec8b9a3b5c056898e3b2ef060bcc5b8df0a59fbc5ef58517e53fdffe8dd42a3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e05c7bdfacfcfe1f845d11f47339e4eae63eb3f5
+          persist-credentials: false
+      - name: Apply and verify the uncommitted source patch
+        env:
+          PATCH_B64: ${{ vars.RTK_4715_PATCH_B64 }}
+          NATIVE_B64: ${{ vars.RTK_4715_NATIVE_B64 }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import base64, hashlib, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          assert git('rev-parse', 'HEAD') == os.environ['EXPECTED_BASE']
+          root = Path(os.environ['RUNNER_TEMP'])
+          patch = base64.b64decode(os.environ['PATCH_B64'], validate=True)
+          assert hashlib.sha256(patch).hexdigest() == os.environ['EXPECTED_PATCH']
+          target = root / 'proposed.patch'
+          target.write_bytes(patch)
+          paths = {
+              'src/cmds/python/pytest_cmd.rs', 'src/cmds/python/README.md',
+              'tests/pytest_line_traceback_test.rs',
+              'tests/fixtures/pytest_line_many_named_raw.txt',
+              'tests/fixtures/pytest_line_many_no_summary_raw.txt',
+              'tests/fixtures/pytest_line_mixed_raw.txt',
+              'tests/fixtures/pytest_line_locations_raw.txt',
+          }
+          assert {row.split('\t', 2)[2] for row in git('apply', '--numstat', str(target)).splitlines()} == paths
+          subprocess.run(['git', 'apply', '--check', '--whitespace=error-all', str(target)], check=True)
+          subprocess.run(['git', 'apply', '--whitespace=error-all', str(target)], check=True)
+          subprocess.run(['git', 'add', '--', *sorted(paths)], check=True)
+          assert git('write-tree') == os.environ['EXPECTED_TREE']
+          native = base64.b64decode(os.environ['NATIVE_B64'], validate=True)
+          assert hashlib.sha256(native).hexdigest() == os.environ['EXPECTED_NATIVE']
+          (root / 'verify-native.py').write_bytes(native)
+          print('Verified source patch:', os.environ['EXPECTED_PATCH'])
+          print('Verified source tree:', git('write-tree'))
+          print('Verified native checker:', os.environ['EXPECTED_NATIVE'])
+          PY
+          cat > "$RUNNER_TEMP/check-source.py" <<'PY'
+          import os, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          assert git('rev-parse', 'HEAD') == os.environ['EXPECTED_BASE']
+          assert git('write-tree') == os.environ['EXPECTED_TREE']
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          assert not git('ls-files', '--others', '--exclude-standard')
+          print('Source tree unchanged:', os.environ['EXPECTED_TREE'])
+          PY
+          python3 "$RUNNER_TEMP/check-source.py"
+      - name: Install native test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fish tree ripgrep jq pkg-config libssl-dev python3-venv
+          python3 -m venv "$RUNNER_TEMP/pytest-4715"
+          "$RUNNER_TEMP/pytest-4715/bin/python" -m pip install --disable-pip-version-check --no-cache-dir pytest==9.1.1 pluggy==1.7.0 packaging==26.3 pygments==2.21.0 iniconfig==2.3.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hook-check-4629
+      - name: Check formatting before the source comparison
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path proxy/Cargo.toml --all -- --check
+          python3 "$RUNNER_TEMP/check-source.py"
+      - name: Prove regression tests fail on the original production source
+        id: baseline
+        run: |
+          set -euo pipefail
+          trap 'git restore --worktree -- src/cmds/python/pytest_cmd.rs' EXIT
+          git show "$EXPECTED_BASE:src/cmds/python/pytest_cmd.rs" > src/cmds/python/pytest_cmd.rs
+          set +e
+          cargo test --locked --test pytest_line_traceback_test > "$RUNNER_TEMP/baseline.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$result" -ne 0
+          python3 <<'PY'
+          import os
+          from pathlib import Path
+          output = (Path(os.environ['RUNNER_TEMP']) / 'baseline.log').read_text()
+          assert 'running 7 tests' in output
+          assert 'test result: FAILED. 1 passed; 6 failed;' in output
+          assert 'test ordinary_short_tracebacks_keep_their_existing_details ... ok' in output
+          section = output.split('---- named_line_failures_count_once_and_recover_the_rest stdout ----', 1)[1].split('---- ', 1)[0]
+          assert 'left: 9' in section and 'right: 10' in section, section
+          print('Confirmed six RED cases: line failures are grouped or duplicated; ordinary traceback control passed')
+          PY
+          "$RUNNER_TEMP/pytest-4715/bin/python" "$RUNNER_TEMP/verify-native.py" --rtk "$PWD/target/$CARGO_BUILD_TARGET/debug/rtk" --expect baseline --report "$RUNNER_TEMP/native-baseline.json"
+          git restore --worktree -- src/cmds/python/pytest_cmd.rs
+          trap - EXIT
+          python3 "$RUNNER_TEMP/check-source.py"
+      - name: Run complete required quality gates on the final source
+        id: quality
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          python3 "$RUNNER_TEMP/check-source.py"
+          cargo clippy --workspace --all-targets -- -D warnings
+          python3 "$RUNNER_TEMP/check-source.py"
+          cargo test --all --no-fail-fast
+          python3 "$RUNNER_TEMP/check-source.py"
+          cargo fmt --manifest-path proxy/Cargo.toml --all -- --check
+      - name: Compare fixed CLI with real pytest
+        id: native
+        run: |
+          "$RUNNER_TEMP/pytest-4715/bin/python" "$RUNNER_TEMP/verify-native.py" --rtk "$PWD/target/$CARGO_BUILD_TARGET/debug/rtk" --expect fixed --report "$RUNNER_TEMP/native-fixed.json"
+          python3 "$RUNNER_TEMP/check-source.py"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-4715-native
+          path: |
+            ${{ runner.temp }}/baseline.log
+            ${{ runner.temp }}/native-baseline.json
+            ${{ runner.temp }}/native-fixed.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Record preflight outcome
+        if: always()
+        env:
+          BASELINE_RESULT: ${{ steps.baseline.outcome }}
+          QUALITY_RESULT: ${{ steps.quality.outcome }}
+          NATIVE_RESULT: ${{ steps.native.outcome }}
+        run: |
+          {
+            printf 'CI-only commit: %s\n\n' "$GITHUB_SHA"
+            printf 'Source base: %s\n\n' "$EXPECTED_BASE"
+            printf 'Source tree: %s\n\n' "$EXPECTED_TREE"
+            printf 'Patch SHA-256: %s\n\n' "$EXPECTED_PATCH"
+            printf 'Native checker SHA-256: %s\n\n' "$EXPECTED_NATIVE"
+            printf 'Baseline counterexample: %s\n\n' "$BASELINE_RESULT"
+            printf 'Final quality gates: %s\n\n' "$QUALITY_RESULT"
+            printf 'Native pytest comparison: %s\n' "$NATIVE_RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
