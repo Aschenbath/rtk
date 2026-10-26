@@ -3,6 +3,7 @@ name: TOML filter coverage 4791 preflight
 on:
   push:
     branches: [ci/toml-filter-coverage-4791-preflight]
+  workflow_dispatch:
 
 permissions:
   contents: read
