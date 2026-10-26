@@ -1,4 +1,5 @@
 name: TOML filter coverage 4791 preflight
+run-name: TOML coverage preflight
 
 on:
   push:
