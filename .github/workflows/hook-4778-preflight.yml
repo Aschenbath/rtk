@@ -1,0 +1,109 @@
+name: hook 4778 preflight
+
+# Fork-only. Runs the CI gates on the rtk-ai/rtk#4778 review changes (49087db)
+# on Linux, macOS and Windows before re-review. The source under test is this
+# commit's parent; this commit adds files under .github/ only, which
+# check-source.sh verifies before anything else runs.
+
+on:
+  push:
+    branches: [ci/hook-4778-preflight]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hook-4778-preflight
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  SOURCE_SHA: 49087db25d9fab649afe0c7d0377d43f081f079d
+  PR_BASE: 32b2ec4386d90f27255ec984ea7b45ba42bf4694
+
+jobs:
+  lint:
+    if: github.repository == 'Aschenbath/rtk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Source under test is 49087db
+        run: bash .github/preflight/check-source.sh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hook-4778-lint
+      - run: rustc --version && cargo --version
+      - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path proxy/Cargo.toml --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - run: cargo doc --locked --no-deps
+
+  test:
+    if: github.repository == 'Aschenbath/rtk'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Source under test is 49087db
+        run: bash .github/preflight/check-source.sh
+      # As in ci.yml: without fish, tests/fish_wrap_test.rs only covers the disabled path.
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'macOS'
+        run: brew install fish
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hook-4778-test
+      - run: rustc --version
+      - name: cargo test --all
+        run: cargo test --locked --all --no-fail-fast
+      # Real `rtk hook claude` SessionStart calls against local listeners; runs
+      # before the OSS build, which replaces target/debug/rtk.
+      - name: SessionStart hook end to end
+        run: |
+          exe=target/debug/rtk
+          if [ "$RUNNER_OS" = Windows ]; then exe=target/debug/rtk.exe; fi
+          py=$(command -v python3 || command -v python)
+          "$py" -I -X utf8 .github/preflight/e2e_4778.py "$exe" "$RUNNER_TEMP/e2e"
+      - name: cargo test --no-default-features (Apache-2.0 edition)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --no-default-features --no-fail-fast
+
+  semgrep:
+    if: github.repository == 'Aschenbath/rtk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: semgrep scan --config .semgrep.yml --baseline-commit "$PR_BASE" --severity ERROR --error --metrics=off
+      - run: semgrep scan --config .semgrep.yml --baseline-commit "$PR_BASE" --severity WARNING --metrics=off || true
