@@ -104,25 +104,54 @@ jobs:
           py=python3
           if [ "$RUNNER_OS" = Windows ]; then py=python; fi
           "$py" -I -X utf8 .github/preflight/annotate-failures.py "$RUNNER_TEMP/test.log"
-      # Real `rtk hook claude` SessionStart calls against local listeners; runs
-      # before the Apache-2.0 build, which replaces target/debug/rtk.
+      # Real `rtk hook claude` SessionStart calls against local listeners. Runs
+      # after a failed test too: cargo test built the binary either way, and a
+      # flaky unrelated test should not hide these results.
       - name: SessionStart hook end to end
+        if: success() || failure()
         shell: bash
         run: |
           exe="$PWD/target/debug/rtk"
           py=python3
           if [ "$RUNNER_OS" = Windows ]; then exe="$PWD/target/debug/rtk.exe"; py=python; fi
+          if [ ! -x "$exe" ]; then echo "::error title=e2e::no rtk binary at $exe"; exit 1; fi
           "$py" -I -X utf8 .github/preflight/e2e_4778.py "$exe" "$RUNNER_TEMP/e2e"
-      - name: cargo test --no-default-features (Apache-2.0 edition)
-        if: runner.os == 'Linux'
+
+  # As ci.yml's oss job: no fish here. tests/fish_wrap_test.rs needs the engine's
+  # pipeline rules once fish is installed, and ci.yml never runs that pairing.
+  oss:
+    if: github.repository == 'Aschenbath/rtk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source under test is 49087db
+        run: bash .github/preflight/check-source.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hook-4778-oss
+      - name: cargo test --no-default-features (Apache-2.0 edition)
         run: |
           set -o pipefail
           cargo test --locked --no-default-features --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/test-oss.log"
-      - name: Report failing Apache-2.0 tests as annotations
-        if: failure() && runner.os == 'Linux'
-        shell: bash
+      - name: Report failing tests as annotations
+        if: failure()
         run: python3 -I -X utf8 .github/preflight/annotate-failures.py "$RUNNER_TEMP/test-oss.log"
+      - name: No BUSL crate in the Apache-2.0 edition
+        run: |
+          crates=$(cargo tree -p rtk --no-default-features -e normal --prefix none | awk '{print $1}' | sort -u)
+          if printf '%s\n' "$crates" | grep -qx 'rtk-engine'; then
+            echo "::error::rtk-engine reached the Apache-2.0 edition's dependency graph"
+            exit 1
+          fi
+          echo "Apache-2.0 edition links no BUSL crate."
 
   semgrep:
     if: github.repository == 'Aschenbath/rtk'
