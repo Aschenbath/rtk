@@ -4,7 +4,7 @@ Each scenario starts its own local listener, points ANTHROPIC_BASE_URL at it, an
 runs the hook in a clean environment whose Claude config dir, profile dirs and
 rtk data all live under the scratch root (nothing under the real profile).
 
-Usage: python -I e2e.py <rtk.exe> <scratch-root>
+Usage: python -I e2e.py <rtk binary> <scratch-root>
 """
 
 import http.server
@@ -17,12 +17,27 @@ import socketserver
 import subprocess
 import sys
 import threading
+import traceback
 
-RTK = sys.argv[1]
-ROOT = pathlib.Path(sys.argv[2])
+# Absolute: on POSIX, subprocess resolves a relative program against the child's cwd.
+RTK = str(pathlib.Path(sys.argv[1]).resolve())
+ROOT = pathlib.Path(sys.argv[2]).resolve()  # env paths must not depend on the child's cwd
 WARN = "not answering as the RTK proxy"
 SPAWNED = ("started the RTK proxy", "launched the RTK proxy", "could not be started")
 RTK_HEALTH = b'{"service":"rtk-proxy","status":"ok"}'
+IN_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def annotate(title, message):
+    """Report a failure as an error annotation: the API serves those without a login."""
+    if not IN_ACTIONS:
+        return
+
+    def esc(text):
+        return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+    title = esc(title).replace(":", "%3A").replace(",", "%2C")
+    print(f"::error title={title}::{esc(message)}")
 
 
 def http_gateway(status, body, host="127.0.0.1", family=socket.AF_INET):
@@ -140,6 +155,8 @@ def check(name, expect, out, bind_addr=None):
     status = "PASS" if not problems else "FAIL"
     shown = msg if msg else "(no output)"
     print(f"{status}  {name:<34} expect={expect:<6} -> {shown}" + (f"   [{'; '.join(problems)}]" if problems else ""))
+    if problems:
+        annotate(f"e2e {name}", f"{shown} [{'; '.join(problems)}]")
     return not problems
 
 
@@ -204,4 +221,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        annotate("e2e crashed", traceback.format_exc()[-2000:])
+        raise
