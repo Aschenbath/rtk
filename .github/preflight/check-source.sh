@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# The commit under test must be SOURCE_SHA plus files under .github/ only, so
-# every result below is a result for SOURCE_SHA's source tree.
+# The commit under test must descend from SOURCE_SHA and differ from it only
+# under .github/, so every result below is a result for SOURCE_SHA's source tree.
 set -euo pipefail
-parent=$(git rev-parse HEAD^)
-if [ "$parent" != "$SOURCE_SHA" ]; then
-  echo "parent is $parent, expected $SOURCE_SHA" >&2
+if ! git merge-base --is-ancestor "$SOURCE_SHA" HEAD; then
+  echo "HEAD does not descend from $SOURCE_SHA" >&2
   exit 1
 fi
 changed=$(git diff --name-only "$SOURCE_SHA" HEAD)
-printf 'Files this commit adds on top of %s:\n%s\n' "$SOURCE_SHA" "$changed"
+printf 'Files that differ from %s:\n%s\n' "$SOURCE_SHA" "$changed"
 if printf '%s\n' "$changed" | grep -v '^\.github/'; then
   echo "files outside .github/ differ from $SOURCE_SHA" >&2
   exit 1

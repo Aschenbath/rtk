@@ -1,9 +1,9 @@
 name: hook 4778 preflight
 
 # Fork-only. Runs the CI gates on the rtk-ai/rtk#4778 review changes (49087db)
-# on Linux, macOS and Windows before re-review. The source under test is this
-# commit's parent; this commit adds files under .github/ only, which
-# check-source.sh verifies before anything else runs.
+# on Linux, macOS and Windows before re-review. This branch differs from
+# 49087db only under .github/, which check-source.sh verifies before anything
+# else runs.
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Source under test is 49087db
         run: bash .github/preflight/check-source.sh
@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Source under test is 49087db
         run: bash .github/preflight/check-source.sh
